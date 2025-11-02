@@ -1,50 +1,68 @@
-import app from "./app";
-import { CacheService, CacheService } from "./core/cache/cache";
-import { SecretsManager} from "./core/security/secretManager";
-import { Logger } from "./core/logger/logger";
-import * as dotenv from "dotenv";
+import app from './app';
+import { logger } from './core/logger/logger';
+import { config, validateConfig } from './core/config/config';
+import { database } from './core/database/connection';
+import { CacheService } from './core/cache/cache';
+import dotenv from 'dotenv';
 
 dotenv.config();
-const logger = Logger.getInstance();
-const PORT = process.env.PORT || 3000;
-const enableAWS = process.env.AWS_SECRET_MANAGER_ENABLED || "0";
 
+const PORT = config.app.port;
+const cacheService = CacheService.getInstance();
 
-async fuction startApp(){
-try{
-    //load aws secrets if enabled
-    if(enableAWS!=="0"){
-        logger.info("Loading configuration from AWS...");
-        const secretManager = new SecretsManager();
-        await secretManager.loadConfig();
-        logger.success("AWS configuration loaded");
-    }
-    // initialize cache service
-    logger.info("initializing cache service...");
-    const cacheService = CacheService.getInstance();
-    await cacheService.set("server_statup", new Date().toISOString(),60);
-    logger.success("cache service initialized");
+async function startServer(): Promise<void> {
+  try {
+    // Validate configuration
+    validateConfig();
+    logger.info('Configuration validated successfully');
 
-// start server
-app.lister(PORT,() => {
-    logger.success( ` server is running on port ${PORT} at ${process.env.NODE_ENV} environment`);
-    logger.info(` Health checkt http://localhost: ${PORT}/api/health`);
-    logger.info(`API Base: http://localhost:${PORT}/api/v1`);
-});
+    // Connect to database
+    await database.connect();
+    logger.info('Database connection established');
 
-} catch (error){
-    logger.error("failed to start server:", error);
+    // Connect to cache (Redis with fallback)
+    await cacheService.connect();
+    logger.info('Cache service initialized');
+
+    // Start server
+    app.listen(PORT, () => {
+      logger.success(`🚀 Server is running on port ${PORT}`);
+      logger.info(`📍 Environment: ${config.app.env}`);
+      logger.info(`🗄️ Database: ${database.isConnected() ? 'Connected' : 'Disconnected'}`);
+      logger.info(`💾 Cache: ${cacheService.isConnected() ? 'Redis Connected' : 'In-Memory Fallback'}`);
+      logger.info(`🏥 Health check: http://localhost:${PORT}/api/health`);
+      logger.info(`📡 API Base: http://localhost:${PORT}/api/v1`);
+    });
+
+  } catch (error) {
+    logger.error('Failed to start server:', error);
     process.exit(1);
-}
+  }
 }
 
-// graceful shutdown
-process.on('SIGTERM', () => {
-    logger.info('SIGTERM received , shutting down gracefully');
-    process.exit(0);
+// Graceful shutdown
+process.on('SIGTERM', async () => {
+  logger.info('SIGTERM received, shutting down gracefully');
+  await database.disconnect();
+  await cacheService.disconnect();
+  process.exit(0);
 });
-process.on('SIGINT', () => {
-    Logger.INFO('SIGINT received, shutting down gracefully');
-    process.exit(0);
+
+process.on('SIGINT', async () => {
+  logger.info('SIGINT received, shutting down gracefully');
+  await database.disconnect();
+  await cacheService.disconnect();
+  process.exit(0);
 });
-startAPP();
+
+process.on('uncaughtException', (error) => {
+  logger.error('Uncaught Exception:', error);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  logger.error(`Unhandled Rejection at: ${promise}, reason: ${reason}`);
+  process.exit(1);
+});
+
+startServer();

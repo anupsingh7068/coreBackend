@@ -1,34 +1,52 @@
-import * as jwt from "jsonwebtoken";
-import { config  } from "../config/config";
+import jwt from 'jsonwebtoken';
+import { config } from '../config/config';
+import { logger } from '../logger/logger';
 
-export interface IJWTPayload{
-    id: string;
-    email?: string;
-    role?: string;
-    [key: string] : any;
+export interface JWTPayload {
+  id: string;
+  email: string;
+  role: string;
 }
 
-
 export class JWTService {
+  private static instance: JWTService;
 
-    private static instance: JWTService;
-    public static getInstance(): JWTService{
-        if(!JWTService.instance){
-            JWTService.instance = new JWTService();
-        }
-        return JWTService.instance;
+  public static getInstance(): JWTService {
+    if (!JWTService.instance) {
+      JWTService.instance = new JWTService();
     }
+    return JWTService.instance;
+  }
 
-    generateToken(payload: IJWTPayload,expiresIn: string = "24h"): string{
-        return jwt.sign(payload,config.security.jwtSecret,{expiresIn});
-
+  public generateToken(payload: JWTPayload): string {
+    try {
+      return jwt.sign(payload, config.security.jwtSecret, {
+        expiresIn: '24h',
+        issuer: config.app.name
+      });
+    } catch (error) {
+      logger.error('Error generating JWT token:', error);
+      throw new Error('Token generation failed');
     }
+  }
 
-    verifyToken(token: string): IJWTPayload{
-        return jwt.verify(token,config.security.jwtSecret) as IJWTPayload;
+  public verifyToken(token: string): JWTPayload {
+    try {
+      return jwt.verify(token, config.security.jwtSecret) as JWTPayload;
+    } catch (error) {
+      logger.error('Error verifying JWT token:', error);
+      throw new Error('Invalid token');
     }
+  }
 
-    decodeToken(token: string): IJWTPayload | null {
-        return jwt.decode(token) as IJWTPayload;
+  public refreshToken(token: string): string {
+    try {
+      const decoded = this.verifyToken(token);
+      const { iat, exp, ...payload } = decoded as any;
+      return this.generateToken(payload);
+    } catch (error) {
+      logger.error('Error refreshing JWT token:', error);
+      throw new Error('Token refresh failed');
     }
+  }
 }

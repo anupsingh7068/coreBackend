@@ -1,53 +1,161 @@
-import { cache } from './../middleware';
-import Redis from "ioredis";
-import { config } from "../config/config";
- export class CacheService {
+import { createClient, RedisClientType } from 'redis';
+import { logger } from '../logger/logger';
+import { config } from '../config/config';
 
-    private static instance: CacheService;
-    private client: Redis;
+export class CacheService {
+  private static instance: CacheService;
+  private redisClient: RedisClientType | null = null;
+  private fallbackCache: Map<string, { value: any; expiry: number }> = new Map();
+  private isRedisConnected = false;
 
-    private constructor() {
-        this.client = new Redis({
-            host: config.cache.host,
-            port: config.cache.port,
-        });
+  public static getInstance(): CacheService {
+    if (!CacheService.instance) {
+      CacheService.instance = new CacheService();
+    }
+    return CacheService.instance;
+  }
+
+  public async connect(): Promise<void> {
+    // Check if Redis should be enabled
+    const enableRedis = process.env.ENABLE_REDIS === 'true';
+    
+    if (!enableRedis) {
+      logger.info('📦 Using in-memory cache (Redis disabled)');
+      this.isRedisConnected = false;
+      return;
     }
 
-    public static getInstance(): CacheService{
-        if(!CacheService.instance){
-            CacheService.instance = new CacheService();
-
+    try {
+      this.redisClient = createClient({
+        socket: {
+          host: config.cache.host,
+          port: config.cache.port,
+          connectTimeout: 5000
         }
-        return CacheService.instance;
+      });
+
+      this.redisClient.on('error', (err) => {
+        logger.warn('Redis unavailable, using in-memory cache');
+        this.isRedisConnected = false;
+      });
+
+      this.redisClient.on('connect', () => {
+        logger.success('✅ Redis connected successfully');
+        this.isRedisConnected = true;
+      });
+
+      this.redisClient.on('disconnect', () => {
+        logger.warn('Redis disconnected, using in-memory cache');
+        this.isRedisConnected = false;
+      });
+
+      await this.redisClient.connect();
+      
+    } catch (error) {
+      logger.info('Redis not available, using in-memory cache');
+      this.isRedisConnected = false;
     }
+  }
 
-    async set(key: string, value: any, ttl?: number): Promise<boolean>{
-        const stringValue = typeof value === "string" ? value : JSON.stringify(value);
-        const result = ttl
-        ? await this.client.set(key,stringValue,"EX",ttl)
-        : await this.client.set(key,stringValue);
-        return result === "OK";
+  public async disconnect(): Promise<void> {
+    try {
+      if (this.redisClient) {
+        await this.redisClient.disconnect();
+        logger.info('Redis disconnected successfully');
+      }
+    } catch (error) {
+      logger.error('Error disconnecting Redis:', error);
     }
+  }
 
-    async get<T = any>(key: string): Promise<T| null>{
-        const value = await this.client.get(key);
-        if(!value) return null;
-        try{
-            return JSON.parse(value);
+  public async set(key: string, value: any, ttlSeconds: number = 3600): Promise<void> {
+    try {
+      const serializedValue = JSON.stringify(value);
+      
+      if (this.isRedisConnected && this.redisClient) {
+        await this.redisClient.setEx(key, ttlSeconds, serializedValue);
+        logger.debug(`Redis cache set: ${key}`);
+      } else {
+        // Fallback to in-memory cache
+        const expiry = Date.now() + (ttlSeconds * 1000);
+        this.fallbackCache.set(key, { value, expiry });
+        logger.debug(`Memory cache set: ${key}`);
+      }
+    } catch (error) {
+      logger.error('Cache set error:', error);
+      // Fallback to in-memory cache
+      const expiry = Date.now() + (ttlSeconds * 1000);
+      this.fallbackCache.set(key, { value, expiry });
+    }
+  }
 
+  public async get(key: string): Promise<any> {
+    try {
+      if (this.isRedisConnected && this.redisClient) {
+        const value = await this.redisClient.get(key);
+        if (value) {
+          logger.debug(`Redis cache hit: ${key}`);
+          return JSON.parse(value);
         }
-        catch {
-            return value as T;
+        return null;
+      } else {
+        // Fallback to in-memory cache
+        const item = this.fallbackCache.get(key);
+        if (!item) return null;
+        
+        if (Date.now() > item.expiry) {
+          this.fallbackCache.delete(key);
+          return null;
         }
+        
+        logger.debug(`Memory cache hit: ${key}`);
+        return item.value;
+      }
+    } catch (error) {
+      logger.error('Cache get error:', error);
+      return null;
     }
+  }
 
-    async delete(key: string): Promise<boolean>{
-        const result = await this.client.del(key);
-        return result > 0;
+  public async exists(key: string): Promise<boolean> {
+    try {
+      if (this.isRedisConnected && this.redisClient) {
+        const exists = await this.redisClient.exists(key);
+        return exists === 1;
+      } else {
+        // Fallback to in-memory cache
+        const item = this.fallbackCache.get(key);
+        if (!item) return false;
+        
+        if (Date.now() > item.expiry) {
+          this.fallbackCache.delete(key);
+          return false;
+        }
+        
+        return true;
+      }
+    } catch (error) {
+      logger.error('Cache exists error:', error);
+      return false;
     }
+  }
 
-    async exists(key: string): Promise<boolean> {
-        const result = await this.client.exists(key);
-        return result === 1;
+  public async delete(key: string): Promise<void> {
+    try {
+      if (this.isRedisConnected && this.redisClient) {
+        await this.redisClient.del(key);
+        logger.debug(`Redis cache deleted: ${key}`);
+      } else {
+        // Fallback to in-memory cache
+        this.fallbackCache.delete(key);
+        logger.debug(`Memory cache deleted: ${key}`);
+      }
+    } catch (error) {
+      logger.error('Cache delete error:', error);
     }
- }
+  }
+
+  public isConnected(): boolean {
+    return this.isRedisConnected;
+  }
+}

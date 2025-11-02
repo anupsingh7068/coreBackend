@@ -1,93 +1,126 @@
+import express from 'express';
+import cors from 'cors';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
+import compression from 'compression';
 import { config } from './core/config/config';
-import * as express from "express";
-import * as cors from "cors";
-import helmet from "helmet";
-impot rateLimit from "express-rate-limit";
-import * as bodyParser from "body-parser";
-import router from "./routes/index.route";
-import { reference-trackere-tracker>ence-tracker>config} from "./core/config/config";
+import { logger } from './core/logger/logger';
+import { HTTP_STATUS, MESSAGES } from './core/config/constants';
 
 const app = express();
 
-app.use(bodyParser.json({ limit: "50mb"}));
-app.use(express.json());
-app.use(express.urlencoded({ extended: true}));
+// Basic middleware
+app.use(compression());
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// rate limiter
-const limiter = rateLimiter({
-  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW || arker-index=0 reference-tracker>"900000"),
-  limit : parseInt(process.env.RATE_LIMIT || "100"),
-  standardHeaders: "draft",
+// Rate limiter
+const limiter = rateLimit({
+  windowMs: config.server.rateLimit.windowMs,
+  max: config.server.rateLimit.maxRequests,
+  standardHeaders: true,
   legacyHeaders: false,
   message: {
     success: false,
-    statusCode 429,
-    message: "too many request Please try again",
-  },
+    statusCode: HTTP_STATUS.TOO_MANY_REQUESTS,
+    message: MESSAGES.TOO_MANY_REQUESTS
+  }
 });
-app: use(limiter);
+app.use(limiter);
 
-// security middleware
-app.use(
-  helmet({
-    contentSecurityPolicy: {
-      directives: {
-        defaultSrc: ["'self'"],
-        styleSrc: ["'self'","'unsafe-inline'"],
-        scriptSrc: ["'self","'unsafe-inline'"],
-        imgSrc: ["'self'", "data:","https:"],
-        connectSrc: ["'self'"],
-      },
-    },
-  })
-);
-//xss Protection
-app.use((req,res,next) =>{
-  res.setHeader("X-XSS-Protection", "1");
-  res.setHeader("X-Content-Type_Options","nosniff");
+// Security middleware
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      scriptSrc: ["'self'"],
+      imgSrc: ["'self'", "data:", "https:"],
+      connectSrc: ["'self'"]
+    }
+  }
+}));
+
+// Additional security headers
+app.use((req, res, next) => {
+  res.setHeader('X-XSS-Protection', '1; mode=block');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
   next();
 });
 
-//cors configuration
-const corsOptionsDelegate = function ( req: any, callback: any){
-  let corsOptions;
-  const origin = req.header("Origin");
-  if(origin) {
-    try{
-      const url =new URL(origin);
-      const allowedOrigins = process.env.ALLOWE_ORIGINS?.split('.') || ['http://localhost:3000'];
-
-      if ( allowedOrigins.includes(origin) || url.port === "3000"){
-        corsOptions = { origin: true, methods: "GET,POST,PUT,DELETE"};
-      }
-      else{
-        corsOptions = {origin:false};
-      }
-    } catch(error){
-      corsOptions = {origin: false};
+// CORS configuration
+const corsOptions: cors.CorsOptions = {
+  origin: (origin, callback) => {
+    if (!origin || config.server.cors.origins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
     }
-  } else {
-    corsOptions = {origin: false};
-  }
-  callback(null,corsOptions);
+  },
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
 };
+app.use(cors(corsOptions));
 
-app.use(cors(corsOptionsDelegate));
-//static files
-app.use(express.static("public"));
+// Request logging
+app.use((req, res, next) => {
+  logger.info(`${req.method} ${req.path} - ${req.ip}`);
+  next();
+});
 
-// api routes
-app.use(router);
-// Health check
-
-app.get("/api/health",(req,res) => {
+// Health check endpoint
+app.get('/api/health', (req, res) => {
   const healthStatus = {
-    status: "Healthy",
-    message: `${config.app.name} is runnning`,
+    status: 'Healthy',
+    message: `${config.app.name} is running`,
     version: config.app.version,
     environment: config.app.env,
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    database: {
+      status: require('./core/database/connection').database.isConnected() ? 'Connected' : 'Disconnected'
+    },
+    cache: {
+      status: require('./core/cache/cache').CacheService.getInstance().isConnected() ? 'Redis Connected' : 'In-Memory Fallback'
+    }
   };
-  res.json({healthStatus});
+  res.status(HTTP_STATUS.OK).json({ success: true, data: healthStatus });
 });
+
+// API routes
+import apiRoutes from './core/routes/index';
+app.use('/api/v1', apiRoutes);
+
+// Debug: List all registered routes
+app._router.stack.forEach((middleware: any) => {
+  if (middleware.route) {
+    logger.info(`Route registered: ${Object.keys(middleware.route.methods)} ${middleware.route.path}`);
+  } else if (middleware.name === 'router') {
+    middleware.handle.stack.forEach((handler: any) => {
+      if (handler.route) {
+        logger.info(`Nested route: ${Object.keys(handler.route.methods)} /api/v1${handler.route.path}`);
+      }
+    });
+  }
+});
+
+// 404 handler
+app.use('*', (req, res) => {
+  res.status(HTTP_STATUS.NOT_FOUND).json({
+    success: false,
+    message: MESSAGES.NOT_FOUND
+  });
+});
+
+// Error handler
+app.use((error: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  logger.error('Application Error:', error);
+  res.status(HTTP_STATUS.INTERNAL_ERROR).json({
+    success: false,
+    message: config.app.env === 'production' ? MESSAGES.INTERNAL_ERROR : error.message
+  });
+});
+
 export default app;

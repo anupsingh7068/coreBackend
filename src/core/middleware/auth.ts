@@ -1,42 +1,64 @@
-import { Request, Response, NextFunction } from "express";
-import { JWTService } from "../security/jwt";
-import { CacheService } from "../cache/cache";
-import { ResponseService } from "../response/response";
+import { Request, Response, NextFunction } from 'express';
+import { JWTService, JWTPayload } from '../security/jwt';
+import { CacheService } from '../cache/cache';
+import { ResponseService } from '../response/response';
+import { logger } from '../logger/logger';
 
-export interface IAuthRequest extends Request {
-    user?: any;
+export interface AuthRequest extends Request {
+  user?: JWTPayload;
 }
 
-export class AuthMiddleware {
-    private jwtService = JWTService.getInstance();
-    private cacheService = CacheService.getInstance();
+const jwtService = JWTService.getInstance();
+const cacheService = CacheService.getInstance();
 
-    authenticate = async ( req: IAuthRequest, res: Response,next: NextFunction) => {
-        try{
-            const token = req.headers.authorization?.split(" ")[1];
-            if(!token){
-                return ResponseService.error(res, "Token required", [],401);
-            }
-            const decoded = this.jwtService.verifyToken(token);
+export const authenticate = async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      ResponseService.unauthorized(res, 'Token required');
+      return;
+    }
 
-            // check if token is blacklisted
-            const isBlacklisted == await this.cacheService.exists(`blacklist:${token}`);
-            if ( isBlacklisted){
-                return ResponseService.error(res,"Token is invalid", [],401);
-            }
-            req.user = decoded;
-            next();
-        }
-        catch(error){
-            return ResponseService.error(res,"Invalid token", [], 401);
-        }
-    };
-    authorize = (roles: string []) => {
-        return (req: IAuthRequest,res: Response,next: NextFunction) => {
-            if(!req.user || !roles.includes(req.user.role)){
-                return ResponseService.error(res,"Insufficient permission",[],403);
-            }
-            next();
-        };
-    };
-}
+    const token = authHeader.split(' ')[1];
+    if (!token) {
+      ResponseService.unauthorized(res, 'Token required');
+      return;
+    }
+
+    // Verify token
+    const decoded = jwtService.verifyToken(token);
+
+    // Check if token is blacklisted
+    const isBlacklisted = await cacheService.exists(`blacklist:${token}`);
+    if (isBlacklisted) {
+      ResponseService.unauthorized(res, 'Token is invalid');
+      return;
+    }
+
+    req.user = decoded;
+    next();
+  } catch (error) {
+    logger.error('Authentication error:', error);
+    ResponseService.unauthorized(res, 'Invalid token');
+  }
+};
+
+export const authorize = (roles: string[]) => {
+  return (req: AuthRequest, res: Response, next: NextFunction): void => {
+    if (!req.user || !roles.includes(req.user.role)) {
+      ResponseService.forbidden(res, 'Insufficient permissions');
+      return;
+    }
+    next();
+  };
+};
+
+// Function to blacklist token
+export const blacklistToken = async (token: string): Promise<void> => {
+  try {
+    await cacheService.set(`blacklist:${token}`, true, 24 * 60 * 60); // 24 hours
+    logger.info('Token blacklisted successfully');
+  } catch (error) {
+    logger.error('Error blacklisting token:', error);
+  }
+};
