@@ -1,11 +1,16 @@
 import winston from 'winston';
 import { config } from '../config/config';
+import * as fs from 'fs';
+import * as path from 'path';
 
 class Logger {
   private static instance: Logger;
   private logger: winston.Logger;
 
   private constructor() {
+    // Ensure logs directory exists
+    this.ensureLogsDirectory();
+
     this.logger = winston.createLogger({
       level: config.app.env === 'production' ? 'info' : 'debug',
       format: winston.format.combine(
@@ -14,6 +19,7 @@ class Logger {
         winston.format.json()
       ),
       transports: [
+        // Console transport
         new winston.transports.Console({
           format: winston.format.combine(
             winston.format.colorize(),
@@ -22,19 +28,31 @@ class Logger {
               return `${timestamp} [${level}]: ${message}${stack ? '\n' + stack : ''}`;
             })
           )
+        }),
+        // File transports (enabled for all environments)
+        new winston.transports.File({
+          filename: 'logs/error.log',
+          level: 'error',
+          format: winston.format.combine(
+            winston.format.timestamp(),
+            winston.format.json()
+          )
+        }),
+        new winston.transports.File({
+          filename: 'logs/combined.log',
+          format: winston.format.combine(
+            winston.format.timestamp(),
+            winston.format.json()
+          )
         })
       ]
     });
+  }
 
-    // Add file transport for production
-    if (config.app.env === 'production') {
-      this.logger.add(new winston.transports.File({
-        filename: 'logs/error.log',
-        level: 'error'
-      }));
-      this.logger.add(new winston.transports.File({
-        filename: 'logs/combined.log'
-      }));
+  private ensureLogsDirectory(): void {
+    const logsDir = path.join(process.cwd(), 'logs');
+    if (!fs.existsSync(logsDir)) {
+      fs.mkdirSync(logsDir, { recursive: true });
     }
   }
 

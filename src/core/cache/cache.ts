@@ -30,12 +30,16 @@ export class CacheService {
         socket: {
           host: config.cache.host,
           port: config.cache.port,
-          connectTimeout: 5000
+          connectTimeout: 5000,
+          reconnectStrategy: false // Disable auto-reconnect to prevent spam
         }
       });
 
+      // Single error handler - no repeated logs
       this.redisClient.on('error', (err) => {
-        logger.warn('Redis unavailable, using in-memory cache');
+        if (this.isRedisConnected) {
+          logger.warn('Redis connection lost, switching to in-memory cache');
+        }
         this.isRedisConnected = false;
       });
 
@@ -45,7 +49,9 @@ export class CacheService {
       });
 
       this.redisClient.on('disconnect', () => {
-        logger.warn('Redis disconnected, using in-memory cache');
+        if (this.isRedisConnected) {
+          logger.warn('Redis disconnected, using in-memory cache');
+        }
         this.isRedisConnected = false;
       });
 
@@ -54,6 +60,7 @@ export class CacheService {
     } catch (error) {
       logger.info('Redis not available, using in-memory cache');
       this.isRedisConnected = false;
+      this.redisClient = null; // Clear client to prevent further attempts
     }
   }
 
